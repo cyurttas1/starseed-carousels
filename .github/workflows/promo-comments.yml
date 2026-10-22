@@ -1,0 +1,36 @@
+name: Store promo link comments
+
+on:
+  schedule:
+    - cron: "50 12 * * *"   # 15:50 TR: waits for 16:03
+    - cron: "30 14 * * *"   # 17:30 TR: catch-up
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: promo-comments
+  cancel-in-progress: false
+
+jobs:
+  comments:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Post due promo comments
+        env:
+          FB_PAGE_ID: ${{ secrets.FB_PAGE_ID }}
+          FB_PAGE_TOKEN: ${{ secrets.FB_PAGE_TOKEN }}
+        run: python3 scripts/publish.py --promos
+      - name: Save state
+        if: always()
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@users.noreply.github.com"
+          git add state
+          if ! git diff --cached --quiet; then
+            git commit -m "promo state $(date -u +%F\ %H:%M)"
+            git pull --rebase origin main && git push origin HEAD:main
+          fi

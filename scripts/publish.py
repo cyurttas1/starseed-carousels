@@ -124,6 +124,25 @@ def run_video(date):
         r = post(f"{v['video_id']}/comments", message=AFFILIATE_COMMENT); save(fb_comment2=r.get("id")); log(f"video {date}: affiliate comment")
 
 
+def run_promos():
+    """Link comment under every scheduled store promo post, 3 minutes after its slot (promos/promos.json)."""
+    items = json.loads((ROOT / "promos" / "promos.json").read_text(encoding="utf-8")); f = ROOT / "state" / "promos.json"; f.parent.mkdir(exist_ok=True)
+    s = json.loads(f.read_text(encoding="utf-8")) if f.exists() else {}
+    failed = False
+    for p in items:
+        if s.get(p["fb_id"]): continue
+        slot = dt.datetime.fromisoformat(p["when"])
+        if now() < slot - dt.timedelta(minutes=15): continue
+        if now() > slot + dt.timedelta(hours=LATE_HOURS): log(f"promo {p['when']}: too late"); continue
+        sleep_until(slot + dt.timedelta(minutes=3))
+        try:
+            r = post(f"{p['fb_id']}/comments", message=p["comment"]); s[p["fb_id"]] = r.get("id"); log(f"promo {p['when']}: comment posted")
+        except Exception as ex:  # noqa: BLE001
+            failed = True; log(f"promo {p['when']}: ERROR {ex}")
+        f.write_text(json.dumps(s, indent=1), encoding="utf-8")
+    sys.exit(1 if failed else 0)
+
+
 def main_videos():
     failed = False
     for f in sorted((ROOT / "videos").glob("*.json")):
@@ -135,6 +154,7 @@ def main_videos():
 
 def main():
     if "--videos" in sys.argv: return main_videos()
+    if "--promos" in sys.argv: return run_promos()
     a = sys.argv[1:]; dry = "--dry-run" in a
     dates = [a[a.index("--date") + 1]] if "--date" in a else sorted(d.name for d in (ROOT / "days").iterdir() if (d / "post.json").exists())
     failed = False
