@@ -1,0 +1,48 @@
+name: Instagram carousel
+
+on:
+  schedule:
+    - cron: "40 15 * * *"   # 18:40 TR: prepares and waits for 19:00
+    - cron: "10 17 * * *"   # 20:10 TR: catch-up if the first run was dropped
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Create containers only, do not publish"
+        type: boolean
+        default: false
+      date:
+        description: "Only this day (YYYY-MM-DD), empty = all due days"
+        required: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: instagram
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 70
+    steps:
+      - uses: actions/checkout@v4
+      - name: Publish due carousels
+        env:
+          FB_PAGE_ID: ${{ secrets.FB_PAGE_ID }}
+          FB_PAGE_TOKEN: ${{ secrets.FB_PAGE_TOKEN }}
+        run: |
+          args=""
+          if [ "${{ inputs.dry_run }}" = "true" ]; then args="$args --dry-run"; fi
+          if [ -n "${{ inputs.date }}" ]; then args="$args --date ${{ inputs.date }}"; fi
+          python3 scripts/publish.py $args
+      - name: Save state
+        if: always()
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@users.noreply.github.com"
+          git add state
+          if ! git diff --cached --quiet; then
+            git commit -m "state $(date -u +%F\ %H:%M)"
+            git pull --rebase origin main && git push origin HEAD:main
+          fi
