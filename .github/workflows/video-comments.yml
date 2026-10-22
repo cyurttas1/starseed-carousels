@@ -1,0 +1,36 @@
+name: Facebook video first comments
+
+on:
+  schedule:
+    - cron: "50 18 * * *"   # 21:50 TR: waits for 22:03
+    - cron: "30 20 * * *"   # 23:30 TR: catch-up
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: video-comments
+  cancel-in-progress: false
+
+jobs:
+  comments:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - name: Post due first comments
+        env:
+          FB_PAGE_ID: ${{ secrets.FB_PAGE_ID }}
+          FB_PAGE_TOKEN: ${{ secrets.FB_PAGE_TOKEN }}
+        run: python3 scripts/publish.py --videos
+      - name: Save state
+        if: always()
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@users.noreply.github.com"
+          git add state
+          if ! git diff --cached --quiet; then
+            git commit -m "video state $(date -u +%F\ %H:%M)"
+            git pull --rebase origin main && git push origin HEAD:main
+          fi

@@ -8,6 +8,8 @@ state/<date>.json with "ig_media" yet:
 Every step is saved to state/<date>.json first, so a re-run never posts twice. A slot more than LATE_HOURS past is marked missed.
 
     python scripts/publish.py [--dry-run] [--date YYYY-MM-DD]
+    python scripts/publish.py --videos      first comments (book link; Mon/Wed/Fri also the affiliate invite) under the Facebook
+                                            videos listed in videos/<date>.json, 3 minutes after the slot (22:00 TR)
 Env: FB_PAGE_ID, FB_PAGE_TOKEN, GITHUB_REPOSITORY (owner/name), GITHUB_REF_NAME
 """
 import sys, os, json, time, pathlib, datetime as dt, urllib.request, urllib.parse, urllib.error
@@ -102,7 +104,37 @@ def run_day(date, dry):
         state_of(date, fb_comment=r.get("id")); log(f"{date}: first comment on Facebook")
 
 
+AFFILIATE_COMMENT = ("✦ Do you create content about spirituality, healing or self-growth? Share our books with your audience "
+                     "and earn 25% on every sale. Become a Starseed Transmission affiliate: https://starseedtransmission.gumroad.com/affiliates")
+AFFILIATE_DAYS = {0, 2, 4}  # Mon/Wed/Fri by slot date
+
+
+def run_video(date):
+    v = json.loads((ROOT / "videos" / f"{date}.json").read_text(encoding="utf-8"))
+    slot = dt.datetime.fromisoformat(v["slot"]); f = ROOT / "state" / f"video-{date}.json"; f.parent.mkdir(exist_ok=True)
+    s = json.loads(f.read_text(encoding="utf-8")) if f.exists() else {}
+    def save(**kw): s.update(kw); f.write_text(json.dumps(s, indent=1), encoding="utf-8")
+    if s.get("fb_comment") and (s.get("fb_comment2") or slot.weekday() not in AFFILIATE_DAYS): return
+    if now() < slot - dt.timedelta(minutes=15): log(f"video {date}: not due yet"); return
+    if now() > slot + dt.timedelta(hours=LATE_HOURS): log(f"video {date}: too late for the comment"); return
+    sleep_until(slot + dt.timedelta(minutes=3))
+    if not s.get("fb_comment"):
+        r = post(f"{v['video_id']}/comments", message=v["first_comment"]); save(fb_comment=r.get("id")); log(f"video {date}: first comment")
+    if slot.weekday() in AFFILIATE_DAYS and not s.get("fb_comment2"):
+        r = post(f"{v['video_id']}/comments", message=AFFILIATE_COMMENT); save(fb_comment2=r.get("id")); log(f"video {date}: affiliate comment")
+
+
+def main_videos():
+    failed = False
+    for f in sorted((ROOT / "videos").glob("*.json")):
+        try: run_video(f.stem)
+        except Exception as ex:  # noqa: BLE001
+            failed = True; log(f"video {f.stem}: ERROR {ex}")
+    sys.exit(1 if failed else 0)
+
+
 def main():
+    if "--videos" in sys.argv: return main_videos()
     a = sys.argv[1:]; dry = "--dry-run" in a
     dates = [a[a.index("--date") + 1]] if "--date" in a else sorted(d.name for d in (ROOT / "days").iterdir() if (d / "post.json").exists())
     failed = False
