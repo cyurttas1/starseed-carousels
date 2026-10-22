@@ -44,8 +44,8 @@ def post(path, **f):
 
 
 def state_of(date, **kw):
-    f = ROOT / "state" / f"{date}.json"
-    s = json.loads(f.read_text(encoding="utf-8")) if f.exists() else {}
+    f = ROOT / "state" / f"{date}.json"; f.parent.mkdir(exist_ok=True)
+    s =json.loads(f.read_text(encoding="utf-8")) if f.exists() else {}
     if kw:
         s.update(kw); f.write_text(json.dumps(s, indent=1), encoding="utf-8")
     return s
