@@ -8,8 +8,10 @@ state/<date>.json with "ig_media" yet:
 Every step is saved to state/<date>.json first, so a re-run never posts twice. A slot more than LATE_HOURS past is marked missed.
 
     python scripts/publish.py [--dry-run] [--date YYYY-MM-DD]
-    python scripts/publish.py --videos      first comments (book link; Mon/Wed/Fri also the affiliate invite) under the Facebook
-                                            videos listed in videos/<date>.json, 3 minutes after the slot (22:00 TR)
+    python scripts/publish.py --comments    first comments under every Facebook video (videos/<date>.json; book link, Mon/Wed/Fri also
+                                            the affiliate invite), store promo post (promos/promos.json) and carousel post (days/<date>/post.json).
+                                            Facebook accepts a comment on a still-scheduled post, so the comment is attached as soon as the
+                                            post exists (push trigger) and is only re-checked after the slot; GitHub's own cron runs hours late.
 Env: FB_PAGE_ID, FB_PAGE_TOKEN, GITHUB_REPOSITORY (owner/name), GITHUB_REF_NAME
 """
 import sys, os, json, time, pathlib, datetime as dt, urllib.request, urllib.parse, urllib.error
@@ -99,62 +101,107 @@ def run_day(date, dry):
         state_of(date, ig_media=m, ig_link=link, ig_at=now().isoformat(timespec="minutes")); log(f"{date}: published {link}")
     s = state_of(date)
     if s.get("ig_media") and not s.get("fb_comment") and p.get("fb_post") and not dry:
-        sleep_until(slot + dt.timedelta(minutes=3))
-        r = post(f"{p['fb_post']}/comments", message=f"{p['first_comment']}\n{p['book_url']}")
-        state_of(date, fb_comment=r.get("id")); log(f"{date}: first comment on Facebook")
+        cid, _ = ensure_comment(p["fb_post"], f"{p['first_comment']}\n{p['book_url']}")
+        state_of(date, fb_comment=cid); log(f"{date}: first comment on Facebook")
 
 
 AFFILIATE_COMMENT = ("✦ Do you create content about spirituality, healing or self-growth? Share our books with your audience "
                      "and earn 25% on every sale. Become a Starseed Transmission affiliate: https://starseedtransmission.gumroad.com/affiliates")
 AFFILIATE_DAYS = {0, 2, 4}  # Mon/Wed/Fri by slot date
+CHECK_FROM = dt.timedelta(minutes=3)  # after the slot the comment is verified (and posted if it did not survive publishing)
+CHECK_DAYS = 10
+
+
+def norm(t): return " ".join((t or "").split())
+
+
+def find_comment(obj, text):
+    """Id of our comment (same text) already under `obj`, else None."""
+    url = f"{GRAPH}/{obj}/comments?" + urllib.parse.urlencode(
+        {"fields": "message", "limit": 100, "order": "chronological", "access_token": os.environ["FB_PAGE_TOKEN"]})
+    for _ in range(10):
+        r = call("GET", url)
+        for c in r.get("data", []):
+            if norm(c.get("message")) == norm(text): return c["id"]
+        url = r.get("paging", {}).get("next")
+        if not url: return None
+    return None
+
+
+def ensure_comment(obj, text):
+    """(comment id, created now). Never posts the same text twice under one post."""
+    cid = find_comment(obj, text)
+    if cid: return cid, False
+    return post(f"{obj}/comments", message=text)["id"], True
+
+
+def sync_comments(label, obj, slot, wanted, s, save):
+    """wanted = [(state key, text)]. Before the slot: attach. After slot + CHECK_FROM: verify once, post what is missing."""
+    if s.get("verified"): return
+    if now() > slot + dt.timedelta(days=CHECK_DAYS): log(f"{label}: older than {CHECK_DAYS} days, skipped"); return
+    for key, text in wanted:
+        cid, created = ensure_comment(obj, text)
+        if created or s.get(key) != cid:
+            save(**{key: cid}); log(f"{label}: {'posted' if created else 'found'} {key}")
+    if now() >= slot + CHECK_FROM: save(verified=now().isoformat(timespec="minutes")); log(f"{label}: verified after the slot")
+
+
+def json_state(f):
+    f.parent.mkdir(exist_ok=True)
+    s = json.loads(f.read_text(encoding="utf-8")) if f.exists() else {}
+    def save(**kw): s.update(kw); f.write_text(json.dumps(s, indent=1), encoding="utf-8")
+    return s, save
 
 
 def run_video(date):
     v = json.loads((ROOT / "videos" / f"{date}.json").read_text(encoding="utf-8"))
-    slot = dt.datetime.fromisoformat(v["slot"]); f = ROOT / "state" / f"video-{date}.json"; f.parent.mkdir(exist_ok=True)
-    s = json.loads(f.read_text(encoding="utf-8")) if f.exists() else {}
-    def save(**kw): s.update(kw); f.write_text(json.dumps(s, indent=1), encoding="utf-8")
-    if s.get("fb_comment") and (s.get("fb_comment2") or slot.weekday() not in AFFILIATE_DAYS): return
-    if now() < slot - dt.timedelta(minutes=15): log(f"video {date}: not due yet"); return
-    if now() > slot + dt.timedelta(hours=LATE_HOURS): log(f"video {date}: too late for the comment"); return
-    sleep_until(slot + dt.timedelta(minutes=3))
-    if not s.get("fb_comment"):
-        r = post(f"{v['video_id']}/comments", message=v["first_comment"]); save(fb_comment=r.get("id")); log(f"video {date}: first comment")
-    if slot.weekday() in AFFILIATE_DAYS and not s.get("fb_comment2"):
-        r = post(f"{v['video_id']}/comments", message=AFFILIATE_COMMENT); save(fb_comment2=r.get("id")); log(f"video {date}: affiliate comment")
+    slot = dt.datetime.fromisoformat(v["slot"]); s, save = json_state(ROOT / "state" / f"video-{date}.json")
+    wanted = [("fb_comment", v["first_comment"])]
+    if slot.weekday() in AFFILIATE_DAYS: wanted.append(("fb_comment2", AFFILIATE_COMMENT))
+    sync_comments(f"video {date}", v["video_id"], slot, wanted, s, save)
 
 
-def run_promos():
-    """Link comment under every scheduled store promo post, 3 minutes after its slot (promos/promos.json)."""
-    items = json.loads((ROOT / "promos" / "promos.json").read_text(encoding="utf-8")); f = ROOT / "state" / "promos.json"; f.parent.mkdir(exist_ok=True)
-    s = json.loads(f.read_text(encoding="utf-8")) if f.exists() else {}
+def run_promo(p, state, save_all):
+    slot = dt.datetime.fromisoformat(p["when"]); k = p["fb_id"]
+    s = {"fb_comment": state.get(k)} if state.get(k) else {}
+    if k in state.get("_verified", []): return
+    def save(**kw):
+        if "fb_comment" in kw: state[k] = kw["fb_comment"]
+        if "verified" in kw: state.setdefault("_verified", []).append(k)
+        save_all()
+    sync_comments(f"promo {p['when'][:13]}", k, slot, [("fb_comment", p["comment"])], s, save)
+
+
+def run_day_comment(date):
+    day = ROOT / "days" / date; p = json.loads((day / "post.json").read_text(encoding="utf-8"))
+    if not p.get("fb_post"): return
+    slot = dt.datetime.combine(dt.date.fromisoformat(date), SLOT, tzinfo=TR); s, save = json_state(ROOT / "state" / f"{date}.json")
+    if s.get("fb_comment_verified") or now() > slot + dt.timedelta(days=CHECK_DAYS): return
+    cid, created = ensure_comment(p["fb_post"], f"{p['first_comment']}\n{p['book_url']}")
+    if created or s.get("fb_comment") != cid: save(fb_comment=cid); log(f"carousel {date}: {'posted' if created else 'found'} first comment")
+    if now() >= slot + CHECK_FROM: save(fb_comment_verified=now().isoformat(timespec="minutes"))
+
+
+def main_comments():
+    """Videos, store promos and carousel posts. One failure never blocks the others; exit 1 at the end so the run shows red."""
     failed = False
-    for p in items:
-        if s.get(p["fb_id"]): continue
-        slot = dt.datetime.fromisoformat(p["when"])
-        if now() < slot - dt.timedelta(minutes=15): continue
-        if now() > slot + dt.timedelta(hours=LATE_HOURS): log(f"promo {p['when']}: too late"); continue
-        sleep_until(slot + dt.timedelta(minutes=3))
-        try:
-            r = post(f"{p['fb_id']}/comments", message=p["comment"]); s[p["fb_id"]] = r.get("id"); log(f"promo {p['when']}: comment posted")
+    def guard(label, fn, *a):
+        nonlocal failed
+        try: fn(*a)
         except Exception as ex:  # noqa: BLE001
-            failed = True; log(f"promo {p['when']}: ERROR {ex}")
-        f.write_text(json.dumps(s, indent=1), encoding="utf-8")
-    sys.exit(1 if failed else 0)
-
-
-def main_videos():
-    failed = False
-    for f in sorted((ROOT / "videos").glob("*.json")):
-        try: run_video(f.stem)
-        except Exception as ex:  # noqa: BLE001
-            failed = True; log(f"video {f.stem}: ERROR {ex}")
+            failed = True; log(f"{label}: ERROR {ex}")
+    for f in sorted((ROOT / "videos").glob("*.json")): guard(f"video {f.stem}", run_video, f.stem)
+    pf = ROOT / "state" / "promos.json"; pf.parent.mkdir(exist_ok=True)
+    state = json.loads(pf.read_text(encoding="utf-8")) if pf.exists() else {}
+    for p in json.loads((ROOT / "promos" / "promos.json").read_text(encoding="utf-8")):
+        guard(f"promo {p['when'][:13]}", run_promo, p, state, lambda: pf.write_text(json.dumps(state, indent=1), encoding="utf-8"))
+    for d in sorted((ROOT / "days").iterdir()):
+        if (d / "post.json").exists(): guard(f"carousel {d.name}", run_day_comment, d.name)
     sys.exit(1 if failed else 0)
 
 
 def main():
-    if "--videos" in sys.argv: return main_videos()
-    if "--promos" in sys.argv: return run_promos()
+    if "--comments" in sys.argv: return main_comments()
     a = sys.argv[1:]; dry = "--dry-run" in a
     dates = [a[a.index("--date") + 1]] if "--date" in a else sorted(d.name for d in (ROOT / "days").iterdir() if (d / "post.json").exists())
     failed = False

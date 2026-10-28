@@ -1,0 +1,45 @@
+name: First comments
+
+# Facebook accepts a comment on a post that is still scheduled, so the first comment (book / store link) is attached
+# the moment a video, store promo or carousel post is added here (push trigger) and re-checked after its slot.
+# GitHub's cron runs hours late, so it is only the safety net: hourly, and it never posts the same comment twice.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "videos/**"
+      - "promos/**"
+      - "days/**/post.json"
+      - "scripts/publish.py"
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: comments
+  cancel-in-progress: false
+
+jobs:
+  comments:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Attach and verify first comments
+        env:
+          FB_PAGE_ID: ${{ secrets.FB_PAGE_ID }}
+          FB_PAGE_TOKEN: ${{ secrets.FB_PAGE_TOKEN }}
+        run: python3 scripts/publish.py --comments
+      - name: Save state
+        if: always()
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@users.noreply.github.com"
+          git add state
+          if ! git diff --cached --quiet; then
+            git commit -m "comment state $(date -u +%F\ %H:%M)"
+            git pull --rebase origin main && git push origin HEAD:main
+          fi
